@@ -1,20 +1,43 @@
 "use client";
 
 import { useState, useCallback } from "react";
-import type { TailorResponse, Step } from "@/lib/types";
 
 export default function Home() {
-  const [step, setStep] = useState<Step>("input");
+  const [step, setStep] = useState<"input" | "processing" | "result">("input");
   const [resume, setResume] = useState("");
   const [jobDescription, setJobDescription] = useState("");
   const [language, setLanguage] = useState<"zh" | "en">("zh");
   const [tone, setTone] = useState<"professional" | "creative" | "concise">("professional");
-  const [result, setResult] = useState<TailorResponse | null>(null);
+  const [result, setResult] = useState<Record<string, unknown> | null>(null);
   const [error, setError] = useState("");
   const [activeTab, setActiveTab] = useState<"resume" | "coverLetter">("resume");
+  const [apiKey, setApiKey] = useState("");
+
+  // 系统提示词
+  const SYSTEM_PROMPT = `你是一位世界级的简历定制专家和职业顾问。你的任务是根据目标职位描述，对用户的原始简历进行量身定制。
+
+核心原则：
+1. **不编造经历** — 只基于用户提供的真实经历进行优化重组
+2. **关键词匹配** — 从职位描述中提取关键技能和要求的词汇，自然融入简历
+3. **量化成就** — 尽可能用数字和结果来描述工作成就
+4. **ATS友好** — 确保简历能通过ATS（申请人追踪系统）的筛选
+5. **结构优化** — 突出最相关的经验，将不相关的精简或后移
+
+输出格式（严格使用以下JSON结构）：
+{
+  "tailoredResume": "Markdown格式的定制简历",
+  "coverLetter": "300字以内的求职信",
+  "matchScore": 85,
+  "keywords": ["关键词1", "关键词2"],
+  "suggestions": ["改进建议1", "改进建议2"]
+}`;
 
   // 提交简历定制请求
   const handleTailor = useCallback(async () => {
+    if (!apiKey || apiKey.trim().length < 10) {
+      setError("请先输入你的 DeepSeek API Key（用于调用AI）");
+      return;
+    }
     if (resume.trim().length < 20) {
       setError("请先粘贴你的简历内容（至少20个字符）");
       return;
@@ -28,25 +51,85 @@ export default function Home() {
     setStep("processing");
 
     try {
-      const response = await fetch("/api/tailor", {
+      const languageInstruction = language === "zh"
+        ? "请用中文输出简历和求职信"
+        : "Please output the resume and cover letter in English";
+
+      const toneInstructions: Record<string, string> = {
+        professional: "使用专业、正式的措辞",
+        creative: "使用有创意、有个人特色的措辞，适合创意行业",
+        concise: "使用简洁有力的措辞，每条经历控制在1-2行",
+      };
+      const toneInstruction = toneInstructions[tone] || toneInstructions["professional"];
+
+      const userPrompt = `请根据以下信息定制简历：
+
+## 我的原始简历：
+${resume}
+
+## 目标职位描述：
+${jobDescription}
+
+## 要求：
+- ${languageInstruction}
+- ${toneInstruction}
+- 匹配度评分请基于：技能匹配度、经验相关度、关键词覆盖度
+- 简历使用Markdown格式，结构清晰
+- 求职信要真诚、有针对性，不要套话
+
+请严格按照JSON格式输出结果。`;
+
+      // 直接在浏览器端调用DeepSeek API
+      const response = await fetch("https://api.deepseek.com/chat/completions", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ resume, jobDescription, language, tone }),
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model: "deepseek-chat",
+          messages: [
+            { role: "system", content: SYSTEM_PROMPT },
+            { role: "user", content: userPrompt },
+          ],
+          temperature: 0.7,
+          max_tokens: 4000,
+          response_format: { type: "json_object" },
+        }),
       });
 
-      const data = await response.json();
-
       if (!response.ok) {
-        throw new Error(data.error || "请求失败");
+        const errText = await response.text();
+        throw new Error(`API调用失败 (${response.status}): ${errText.slice(0, 200)}`);
       }
 
-      setResult(data);
+      const aiResult = await response.json();
+      const content = aiResult.choices?.[0]?.message?.content;
+
+      if (!content) {
+        throw new Error("AI返回结果为空");
+      }
+
+      // 解析JSON
+      let parsed: Record<string, unknown>;
+      try {
+        parsed = JSON.parse(content);
+      } catch {
+        const jsonMatch = content.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          parsed = JSON.parse(jsonMatch[0]);
+        } else {
+          throw new Error("AI返回格式异常");
+        }
+      }
+
+      setResult(parsed);
       setStep("result");
     } catch (err) {
       setError(err instanceof Error ? err.message : "未知错误");
       setStep("input");
     }
-  }, [resume, jobDescription, language, tone]);
+  }, [resume, jobDescription, language, tone, apiKey, SYSTEM_PROMPT]);
 
   // 重新开始
   const handleReset = () => {
@@ -60,14 +143,15 @@ export default function Home() {
   const handleCopy = async (text: string) => {
     try {
       await navigator.clipboard.writeText(text);
+      alert("已复制到剪贴板！");
     } catch {
-      // fallback
       const textarea = document.createElement("textarea");
       textarea.value = text;
       document.body.appendChild(textarea);
       textarea.select();
       document.execCommand("copy");
       document.body.removeChild(textarea);
+      alert("已复制到剪贴板！");
     }
   };
 
@@ -104,7 +188,7 @@ export default function Home() {
             </span>
           </div>
           <div className="flex items-center gap-4 text-sm" style={{ color: "var(--muted)" }}>
-            <span>免费使用 · 中英双语</span>
+            <span>免费使用 · 中英双语 · 数据不离开浏览器</span>
           </div>
         </div>
       </header>
@@ -125,6 +209,32 @@ export default function Home() {
               </p>
             </div>
 
+            {/* API Key 输入 */}
+            <div className="rounded-xl border p-4"
+              style={{ borderColor: "var(--border)", background: "var(--surface)" }}>
+              <div className="flex items-center gap-2 mb-2">
+                <span className="text-sm font-medium">🔑 DeepSeek API Key</span>
+                <span className="text-xs" style={{ color: "var(--muted)" }}>
+                  （你的key只在浏览器使用，不会上传到任何服务器）
+                </span>
+              </div>
+              <input
+                type="password"
+                className="w-full rounded-lg border p-2.5 text-sm focus:outline-none focus:ring-2"
+                style={{
+                  borderColor: "var(--border)",
+                  background: "var(--background)",
+                  color: "var(--foreground)",
+                }}
+                placeholder="sk-..."
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+              />
+              <p className="text-xs mt-1.5" style={{ color: "var(--muted)" }}>
+                没有Key？<a href="https://platform.deepseek.com/api_keys" target="_blank" rel="noopener noreferrer" style={{ color: "var(--primary)" }}>免费注册获取</a>（DeepSeek API约 ¥1/百万token，非常便宜）
+              </p>
+            </div>
+
             {/* 双栏输入 */}
             <div className="grid md:grid-cols-2 gap-6">
               {/* 左：简历输入 */}
@@ -142,7 +252,7 @@ export default function Home() {
                     background: "var(--background)",
                     color: "var(--foreground)",
                   }}
-                  placeholder={`粘贴你的简历内容...\n\n示例：\n张三 | 产品经理 | 5年经验\n\n工作经历：\n- XX公司 产品经理 (2021-至今)\n  负责XX产品线，DAU从10万提升至50万\n\n教育：\n- XX大学 计算机科学 本科`}
+                  placeholder={"粘贴你的简历内容...\n\n示例：\n张三 | 产品经理 | 5年经验\n\n工作经历：\n- XX公司 产品经理 (2021-至今)\n  负责XX产品线，DAU从10万提升至50万\n\n教育：\n- XX大学 计算机科学 本科"}
                   value={resume}
                   onChange={(e) => setResume(e.target.value)}
                 />
@@ -167,7 +277,7 @@ export default function Home() {
                     background: "var(--background)",
                     color: "var(--foreground)",
                   }}
-                  placeholder={`粘贴目标职位的JD...\n\n示例：\n职位：高级产品经理\n公司：XX科技\n\n要求：\n- 5年以上互联网产品经验\n- 熟悉数据分析和用户增长\n- 有B端SaaS产品经验优先...`}
+                  placeholder={"粘贴目标职位的JD...\n\n示例：\n职位：高级产品经理\n公司：XX科技\n\n要求：\n- 5年以上互联网产品经验\n- 熟悉数据分析和用户增长\n- 有B端SaaS产品经验优先..."}
                   value={jobDescription}
                   onChange={(e) => setJobDescription(e.target.value)}
                 />
@@ -207,11 +317,11 @@ export default function Home() {
               <div className="flex items-center gap-2">
                 <span className="text-sm font-medium" style={{ color: "var(--muted)" }}>风格：</span>
                 <div className="flex rounded-lg overflow-hidden border" style={{ borderColor: "var(--border)" }}>
-                  {[
+                  {([
                     { key: "professional" as const, label: "专业" },
                     { key: "creative" as const, label: "创意" },
                     { key: "concise" as const, label: "精简" },
-                  ].map((t) => (
+                  ] as const).map((t) => (
                     <button
                       key={t.key}
                       onClick={() => setTone(t.key)}
@@ -257,7 +367,7 @@ export default function Home() {
                 AI 正在为你定制简历...
               </h2>
               <p className="text-sm" style={{ color: "var(--muted)" }}>
-                分析你的经历 · 匹配职位关键词 · 优化表述 · 生成求职信
+                分析你的经历 · 匹配职位关键词 · 优化表述 · 生成求职信（约10-30秒）
               </p>
             </div>
           </div>
@@ -276,13 +386,13 @@ export default function Home() {
                 <div className="text-sm" style={{ color: "var(--muted)" }}>
                   匹配度：
                   <span className="font-bold text-lg ml-1"
-                    style={{ color: result.matchScore >= 70 ? "var(--success)" : result.matchScore >= 40 ? "var(--warning)" : "var(--danger)" }}>
-                    {result.matchScore}%
+                    style={{ color: Number(result.matchScore || 0) >= 70 ? "var(--success)" : Number(result.matchScore || 0) >= 40 ? "var(--warning)" : "var(--danger)" }}>
+                    {String(result.matchScore)}%
                   </span>
                 </div>
               </div>
               <div className="flex gap-2">
-                <button onClick={() => handleCopy(activeTab === "resume" ? result.tailoredResume : result.coverLetter)}
+                <button onClick={() => handleCopy(activeTab === "resume" ? String(result.tailoredResume || "") : String(result.coverLetter || ""))}
                   className="px-4 py-2 rounded-lg text-sm font-medium border transition-colors"
                   style={{ borderColor: "var(--border)", color: "var(--foreground)" }}>
                   📋 复制
@@ -321,12 +431,12 @@ export default function Home() {
               style={{ borderColor: "var(--border)", background: "var(--surface)" }}>
               {activeTab === "resume" ? (
                 <div className="resume-preview whitespace-pre-wrap"
-                  dangerouslySetInnerHTML={{ __html: markdownToHtml(result.tailoredResume) }}
+                  dangerouslySetInnerHTML={{ __html: markdownToHtml(String(result.tailoredResume || "")) }}
                 />
               ) : (
                 <div className="whitespace-pre-wrap leading-relaxed"
                   style={{ color: "var(--foreground)" }}>
-                  {result.coverLetter}
+                  {String(result.coverLetter || "")}
                 </div>
               )}
             </div>
@@ -334,14 +444,14 @@ export default function Home() {
             {/* 侧栏信息 */}
             <div className="grid md:grid-cols-2 gap-4">
               {/* 关键词 */}
-              {result.keywords.length > 0 && (
+              {Array.isArray(result.keywords) && (result.keywords as unknown[]).length > 0 && (
                 <div className="rounded-xl border p-4" style={{ borderColor: "var(--border)", background: "var(--surface)" }}>
                   <h3 className="font-semibold mb-2">🎯 匹配关键词</h3>
                   <div className="flex flex-wrap gap-2">
-                    {result.keywords.map((kw, i) => (
+                    {(result.keywords as unknown[]).map((kw, i) => (
                       <span key={i} className="px-2 py-1 rounded-md text-xs font-medium"
-                        style={{ background: "var(--primary)", color: "white", opacity: 0.8 + (0.2 * i / result.keywords.length) }}>
-                        {kw}
+                        style={{ background: "var(--primary)", color: "white", opacity: 0.8 + (0.2 * Number(i) / (result.keywords as unknown[]).length) }}>
+                        {String(kw)}
                       </span>
                     ))}
                   </div>
@@ -349,14 +459,14 @@ export default function Home() {
               )}
 
               {/* 改进建议 */}
-              {result.suggestions.length > 0 && (
+              {Array.isArray(result.suggestions) && result.suggestions.length > 0 && (
                 <div className="rounded-xl border p-4" style={{ borderColor: "var(--border)", background: "var(--surface)" }}>
                   <h3 className="font-semibold mb-2">💡 改进建议</h3>
                   <ul className="space-y-1 text-sm">
-                    {result.suggestions.map((s, i) => (
+                    {(result.suggestions as unknown[]).map((s, i) => (
                       <li key={i} className="flex items-start gap-2">
                         <span style={{ color: "var(--warning)" }}>•</span>
-                        <span style={{ color: "var(--foreground)" }}>{s}</span>
+                        <span style={{ color: "var(--foreground)" }}>{String(s)}</span>
                       </li>
                     ))}
                   </ul>
@@ -370,7 +480,11 @@ export default function Home() {
       {/* 页脚 */}
       <footer className="border-t py-6 text-center text-sm" style={{ borderColor: "var(--border)", color: "var(--muted)" }}>
         <p>ResumeTailor — AI驱动的简历定制工具 · 支持中英双语</p>
-        <p className="mt-1 text-xs">你的数据仅用于本次处理，不会被存储</p>
+        <p className="mt-1 text-xs">所有数据仅在浏览器本地处理，不会上传到任何服务器</p>
+        <p className="mt-2 text-xs">
+          Powered by <a href="https://platform.deepseek.com" target="_blank" rel="noopener noreferrer" style={{ color: "var(--primary)" }}>DeepSeek AI</a>
+          {" · "}Open Source on <a href="https://github.com/tyr1105/resume-tailor" target="_blank" rel="noopener noreferrer" style={{ color: "var(--primary)" }}>GitHub</a>
+        </p>
       </footer>
     </div>
   );
