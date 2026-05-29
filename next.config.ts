@@ -7,7 +7,7 @@ const nextConfig: NextConfig = {
   },
   // GitHub Pages部署需要设置basePath
   // 如果用自定义域名则不需要
-  // basePath: "/resume-tailor",
+  basePath: "/resume-tailor",
 };
 
 export default nextConfig;
